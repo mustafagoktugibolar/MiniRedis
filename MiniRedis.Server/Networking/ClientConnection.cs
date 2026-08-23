@@ -7,18 +7,10 @@ namespace MiniRedis.Server.Networking
 {
     internal sealed class ClientConnection(TcpClient tcpClient) : IDisposable
     {
-        private bool _disposed;
         private readonly TcpClient _tcpClient = tcpClient;
         private readonly NetworkStream _stream = tcpClient.GetStream();
+        private bool _disposed;
 
-        public void Dispose()
-        {
-            if (_disposed)
-                return;
-
-            _tcpClient.Dispose();
-            _disposed = true;
-        }
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
@@ -50,6 +42,15 @@ namespace MiniRedis.Server.Networking
                 Dispose();
             }
 
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _tcpClient.Dispose();
+            _disposed = true;
         }
     }
 }
