@@ -28,7 +28,7 @@ namespace MiniRedis.Server.Networking
 
                     if (RespParser.TryParse(data, out RedisCommand? command, out int consumed))
                     {
-                            Console.WriteLine(command!.Name);
+                        Console.WriteLine(command!.Name);
                     }
 
                 }
