@@ -1,7 +1,6 @@
-﻿
-using System.Diagnostics;
-using System.Net.Sockets;
-using System.Text;
+﻿using System.Net.Sockets;
+using MiniRedis.Server.Commands;
+using MiniRedis.Server.Protocol;
 
 namespace MiniRedis.Server.Networking
 {
@@ -14,6 +13,7 @@ namespace MiniRedis.Server.Networking
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
+            // TODO: change this to a pooled buffer in the future
             byte[] buffer = new byte[4096];
 
             try
@@ -22,12 +22,14 @@ namespace MiniRedis.Server.Networking
                 {
                     int bytesRead = await _stream.ReadAsync(buffer, cancellationToken);
 
-                    if (bytesRead == 0) // Client connection closed successfuly
-                        break;
+                    if (bytesRead == 0) break; // Client connection closed successfuly
+                        
+                    ReadOnlySpan<byte> data = buffer.AsSpan(0, bytesRead);
 
-                    string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    Console.WriteLine($"Request recieved {request}");
+                    if (RespParser.TryParse(data, out RedisCommand? command, out int consumed))
+                    {
+                            Console.WriteLine(command!.Name);
+                    }
 
                 }
             }
@@ -46,8 +48,7 @@ namespace MiniRedis.Server.Networking
 
         public void Dispose()
         {
-            if (_disposed)
-                return;
+            if (_disposed) return;
 
             _tcpClient.Dispose();
             _disposed = true;

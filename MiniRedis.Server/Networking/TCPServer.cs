@@ -18,20 +18,14 @@ namespace MiniRedis.Server.Networking
                     TcpClient tcpClient = await _tcpListener.AcceptTcpClientAsync(cancellationToken);
                     using var clientConnection = new ClientConnection(tcpClient);
                     await clientConnection.RunAsync(cancellationToken);
-
-
                 }
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                // Expected shutdown.
-            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { /* Expected shutdown. */ }
         }
 
         public void Dispose()
         {
-            if (_disposed)
-                return;
+            if (_disposed) return;
 
             _tcpListener.Dispose();
             _disposed = true;
