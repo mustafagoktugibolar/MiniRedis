@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Globalization;
+using System.Numerics;
 using System.Text;
 
 namespace MiniRedis.Server.Protocol;
@@ -10,6 +12,9 @@ namespace MiniRedis.Server.Protocol;
 internal static class RespParser
 {
     private static ReadOnlySpan<byte> LineEnd => "\r\n"u8;
+    private const int MaxBulkStringLength = 512 * 1024;
+    private const int MaxArrayLength = 1024 * 1024;
+    private const int MaxNestingDepth = 64;
 
     public static ParseStatus Parse(ReadOnlySequence<byte> buffer, out RespValue? value, out SequencePosition consumed, out string? error)
     {
@@ -21,7 +26,7 @@ internal static class RespParser
 
         try
         {
-            if (!TryParse(ref reader, out value))
+            if (!TryParse(ref reader, out value, depth: 0))
                 return ParseStatus.Incomplete;
 
             consumed = reader.Position;
@@ -37,17 +42,15 @@ internal static class RespParser
             error = ex.Message;
             return ParseStatus.Invalid;
         }
-        catch (NotImplementedException ex)
-        {
-            error = ex.Message;
-            return ParseStatus.Invalid;
-        }
     }
 
-    private static bool TryParse(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParse(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
         value = null;
         SequenceReader<byte> start = reader;
+
+        if (depth > MaxNestingDepth)
+            throw new InvalidDataException($"RESP nesting depth cannot exceed {MaxNestingDepth}.");
 
         if (!reader.TryRead(out byte prefix))
             return false;
@@ -58,17 +61,17 @@ internal static class RespParser
             RespType.SimpleErrors => TryParseSimpleError(ref reader, out value),
             RespType.Integers => TryParseInteger(ref reader, out value),
             RespType.BulkStrings => TryParseBulkString(ref reader, out value),
-            RespType.Arrays => TryParseArray(ref reader, out value),
+            RespType.Arrays => TryParseArray(ref reader, out value, depth),
             RespType.Nulls => TryParseNull(ref reader, out value),
             RespType.Booleans => TryParseBoolean(ref reader, out value),
             RespType.Doubles => TryParseDouble(ref reader, out value),
             RespType.BigNumbers => TryParseBigNumber(ref reader, out value),
             RespType.BulkErrors => TryParseBulkError(ref reader, out value),
             RespType.VerbatimStrings => TryParseVerbatimString(ref reader, out value),
-            RespType.Maps => TryParseMap(ref reader, out value),
-            RespType.Attributes => TryParseAttribute(ref reader, out value),
-            RespType.Sets => TryParseSet(ref reader, out value),
-            RespType.Pushes => TryParsePush(ref reader, out value),
+            RespType.Maps => TryParseMap(ref reader, out value, depth),
+            RespType.Attributes => TryParseAttribute(ref reader, out value, depth),
+            RespType.Sets => TryParseSet(ref reader, out value, depth),
+            RespType.Pushes => TryParsePush(ref reader, out value, depth),
 
             _ => throw new InvalidDataException(
                 $"Unknown RESP type prefix: '{(char)prefix}'")
@@ -84,10 +87,12 @@ internal static class RespParser
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
+        if (!TryReadLengthPrefixedPayload(ref reader, allowNull: true, out ReadOnlySequence<byte> data, out bool isNull))
             return false;
 
-        value = new RespBulkString(data.ToArray());
+        value = isNull
+            ? new RespNull()
+            : new RespBulkString(data.ToArray());
 
         return true;
     }
@@ -96,7 +101,7 @@ internal static class RespParser
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
+        if (!TryReadLengthPrefixedPayload(ref reader, allowNull: false, out ReadOnlySequence<byte> data, out _))
             return false;
 
         value = new RespBulkError(data.ToArray());
@@ -108,7 +113,7 @@ internal static class RespParser
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
+        if (!TryReadLengthPrefixedPayload(ref reader, allowNull: false, out ReadOnlySequence<byte> data, out _))
             return false;
 
         if (data.Length < 4)
@@ -125,9 +130,14 @@ internal static class RespParser
         return true;
     }
 
-    private static bool TryReadLengthPrefixedPayload(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> data)
+    private static bool TryReadLengthPrefixedPayload(
+        ref SequenceReader<byte> reader,
+        bool allowNull,
+        out ReadOnlySequence<byte> data,
+        out bool isNull)
     {
         data = default;
+        isNull = false;
         SequenceReader<byte> start = reader;
 
         if (!TryReadLine(ref reader, out ReadOnlySequence<byte> lengthBytes))
@@ -139,8 +149,17 @@ internal static class RespParser
         if (!int.TryParse(GetString(lengthBytes, Encoding.ASCII), out int length))
             throw new InvalidDataException("Invalid length-prefixed RESP value.");
 
+        if (length == -1 && allowNull)
+        {
+            isNull = true;
+            return true;
+        }
+
         if (length < 0)
             throw new InvalidDataException("Length cannot be negative.");
+
+        if (length > MaxBulkStringLength)
+            throw new InvalidDataException($"Bulk string length cannot exceed {MaxBulkStringLength} bytes.");
 
         if (reader.Remaining < length + LineEnd.Length)
         {
@@ -163,24 +182,24 @@ internal static class RespParser
         return true;
     }
 
-    private static bool TryParseArray(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParseArray(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
         value = null;
 
-        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> countBytes))
+        if (!TryReadCount(ref reader, allowNull: true, out int numberOfElements, out bool isNull))
             return false;
 
-        if (!int.TryParse(GetString(countBytes, Encoding.ASCII), out int numberOfElements))
-            throw new InvalidDataException("Invalid array length.");
-
-        if (numberOfElements < 0)
-            throw new InvalidDataException("Array length cannot be negative.");
+        if (isNull)
+        {
+            value = new RespNull();
+            return true;
+        }
 
         List<RespValue> values = new(numberOfElements);
 
         for (int i = 0; i < numberOfElements; i++)
         {
-            if (!TryParse(ref reader, out RespValue? item))
+            if (!TryParse(ref reader, out RespValue? item, depth + 1))
                 return false;
 
             values.Add(item!);
@@ -201,34 +220,88 @@ internal static class RespParser
         return TryParseSimple(ref reader, x => new RespSimpleError(x), out value);
     }
 
-    private static bool TryParsePush(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParsePush(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
-        throw new NotSupportedException("RESP push values are not supported yet.");
+        if (!TryParseList(ref reader, depth, out IReadOnlyList<RespValue>? values))
+        {
+            value = null;
+            return false;
+        }
+
+        value = new RespPush(values!);
+        return true;
     }
 
-    private static bool TryParseAttribute(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParseAttribute(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
-        throw new NotSupportedException("RESP attribute values are not supported yet.");
+        if (!TryParseKeyValuePairs(ref reader, depth, out IReadOnlyList<KeyValuePair<RespValue, RespValue>>? values))
+        {
+            value = null;
+            return false;
+        }
+
+        value = new RespAttribute(values!);
+        return true;
     }
 
-    private static bool TryParseSet(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParseSet(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
-        throw new NotSupportedException("RESP set values are not supported yet.");
+        if (!TryParseList(ref reader, depth, out IReadOnlyList<RespValue>? values))
+        {
+            value = null;
+            return false;
+        }
+
+        value = new RespSet(values!);
+        return true;
     }
 
-    private static bool TryParseMap(ref SequenceReader<byte> reader, out RespValue? value)
+    private static bool TryParseMap(ref SequenceReader<byte> reader, out RespValue? value, int depth)
     {
-        throw new NotSupportedException("RESP map values are not supported yet.");
+        if (!TryParseKeyValuePairs(ref reader, depth, out IReadOnlyList<KeyValuePair<RespValue, RespValue>>? values))
+        {
+            value = null;
+            return false;
+        }
+
+        value = new RespMap(values!);
+        return true;
     }
 
     private static bool TryParseBigNumber(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotSupportedException("RESP big number values are not supported yet.");
+        value = null;
+
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
+            return false;
+
+        if (!BigInteger.TryParse(GetString(line, Encoding.ASCII), NumberStyles.Integer, CultureInfo.InvariantCulture, out BigInteger result))
+            throw new InvalidDataException("Invalid RESP big number value.");
+
+        value = new RespBigNumber(result);
+        return true;
     }
 
     private static bool TryParseDouble(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotSupportedException("RESP double values are not supported yet.");
+        value = null;
+
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
+            return false;
+
+        string text = GetString(line, Encoding.ASCII);
+
+        double result = text switch
+        {
+            "inf" => double.PositiveInfinity,
+            "-inf" => double.NegativeInfinity,
+            "nan" => double.NaN,
+            _ when double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) => parsed,
+            _ => throw new InvalidDataException("Invalid RESP double value.")
+        };
+
+        value = new RespDouble(result);
+        return true;
     }
 
     private static bool TryParseBoolean(ref SequenceReader<byte> reader, out RespValue? value)
@@ -270,7 +343,16 @@ internal static class RespParser
 
     private static bool TryParseInteger(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotSupportedException("RESP integer values are not supported yet.");
+        value = null;
+
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
+            return false;
+
+        if (!long.TryParse(GetString(line, Encoding.ASCII), NumberStyles.Integer, CultureInfo.InvariantCulture, out long result))
+            throw new InvalidDataException("Invalid RESP integer value.");
+
+        value = new RespInteger(result);
+        return true;
     }
 
     private static bool TryParseSimple(ref SequenceReader<byte> reader, Func<string, RespValue> factory, out RespValue? value)
@@ -288,6 +370,80 @@ internal static class RespParser
     private static bool TryReadLine(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> line)
     {
         return reader.TryReadTo(out line, LineEnd, advancePastDelimiter: true);
+    }
+
+    private static bool TryReadCount(ref SequenceReader<byte> reader, bool allowNull, out int count, out bool isNull)
+    {
+        count = 0;
+        isNull = false;
+
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> countBytes))
+            return false;
+
+        if (!int.TryParse(GetString(countBytes, Encoding.ASCII), out count))
+            throw new InvalidDataException("Invalid aggregate length.");
+
+        if (count == -1 && allowNull)
+        {
+            isNull = true;
+            return true;
+        }
+
+        if (count < 0)
+            throw new InvalidDataException("Aggregate length cannot be negative.");
+
+        if (count > MaxArrayLength)
+            throw new InvalidDataException($"Aggregate length cannot exceed {MaxArrayLength} elements.");
+
+        return true;
+    }
+
+    private static bool TryParseList(ref SequenceReader<byte> reader, int depth, out IReadOnlyList<RespValue>? values)
+    {
+        values = null;
+
+        if (!TryReadCount(ref reader, allowNull: false, out int count, out _))
+            return false;
+
+        List<RespValue> items = new(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!TryParse(ref reader, out RespValue? item, depth + 1))
+                return false;
+
+            items.Add(item!);
+        }
+
+        values = items;
+        return true;
+    }
+
+    private static bool TryParseKeyValuePairs(
+        ref SequenceReader<byte> reader,
+        int depth,
+        out IReadOnlyList<KeyValuePair<RespValue, RespValue>>? values)
+    {
+        values = null;
+
+        if (!TryReadCount(ref reader, allowNull: false, out int count, out _))
+            return false;
+
+        List<KeyValuePair<RespValue, RespValue>> items = new(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!TryParse(ref reader, out RespValue? key, depth + 1))
+                return false;
+
+            if (!TryParse(ref reader, out RespValue? itemValue, depth + 1))
+                return false;
+
+            items.Add(new KeyValuePair<RespValue, RespValue>(key!, itemValue!));
+        }
+
+        values = items;
+        return true;
     }
 
     private static byte GetByteAt(ReadOnlySequence<byte> sequence, long index)

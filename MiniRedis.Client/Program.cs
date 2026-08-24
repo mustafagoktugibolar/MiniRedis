@@ -10,7 +10,7 @@ if (args.Length == 0)
         Usage:
           dotnet run -- PING
           dotnet run -- GET name
-          dotnet run -- SET name mustafa
+          dotnet run -- SET name goktug
           dotnet run -- DEL name
         """);
 

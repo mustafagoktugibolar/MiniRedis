@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="MiniRedis.Client/MiniRedis.Client.csproj" Id="3a856ab8-e63e-4b91-8756-437b847baf6c" />
   <Project Path="MiniRedis.Server/MiniRedis.Server.csproj" Id="bb4cd87b-0c1e-4e3f-9f99-566fdf9ef4de" />
+  <Project Path="MiniRedis.Tests/MiniRedis.Tests.csproj" Id="7ef8027f-2d01-4a39-aa93-c8205ef1128f" />
 </Solution>
