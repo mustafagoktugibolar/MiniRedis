@@ -22,8 +22,7 @@ internal sealed record RespBulkString(byte[] Value) : RespValue;
 
 // *
 // *2\r\n...
-internal sealed record RespArray(
-    IReadOnlyList<RespValue> Values) : RespValue;
+internal sealed record RespArray(IReadOnlyList<RespValue> Values) : RespValue;
 
 // _
 // _\r\n
@@ -47,26 +46,20 @@ internal sealed record RespBulkError(byte[] Value) : RespValue;
 
 // =
 // =15\r\ntxt:Some string\r\n
-internal sealed record RespVerbatimString(
-    string Encoding,
-    byte[] Value) : RespValue;
+internal sealed record RespVerbatimString(string Encoding, byte[] Value) : RespValue;
 
 // %
 // %2\r\n+first\r\n:1\r\n+second\r\n:2\r\n
-internal sealed record RespMap(
-    IReadOnlyList<KeyValuePair<RespValue, RespValue>> Values) : RespValue;
+internal sealed record RespMap(IReadOnlyList<KeyValuePair<RespValue, RespValue>> Values) : RespValue;
 
 // |
 // |1\r\n+key\r\n+value\r\n
-internal sealed record RespAttribute(
-    IReadOnlyList<KeyValuePair<RespValue, RespValue>> Values) : RespValue;
+internal sealed record RespAttribute(IReadOnlyList<KeyValuePair<RespValue, RespValue>> Values) : RespValue;
 
 // ~
 // ~3\r\n+one\r\n+two\r\n+three\r\n
-internal sealed record RespSet(
-    IReadOnlyList<RespValue> Values) : RespValue;
+internal sealed record RespSet(IReadOnlyList<RespValue> Values) : RespValue;
 
 // >
 // >2\r\n+message\r\n+hello\r\n
-internal sealed record RespPush(
-    IReadOnlyList<RespValue> Values) : RespValue;
+internal sealed record RespPush(IReadOnlyList<RespValue> Values) : RespValue;

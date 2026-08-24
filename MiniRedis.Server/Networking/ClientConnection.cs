@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.IO.Pipelines;
 using System.Net.Sockets;
 using MiniRedis.Server.Commands;
 using MiniRedis.Server.Protocol;
@@ -10,28 +12,47 @@ namespace MiniRedis.Server.Networking
         private readonly NetworkStream _stream = tcpClient.GetStream();
         private bool _disposed;
 
+        private const int ReadBufferSize = 4096;
+        private const int MaxRequestSize = 1024 * 1024;
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
-            // TODO: change this to a pooled buffer in the future
-            byte[] buffer = new byte[4096];
+            PipeReader reader = PipeReader.Create(_stream, new StreamPipeReaderOptions(bufferSize: ReadBufferSize));
 
             try
             {
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    int bytesRead = await _stream.ReadAsync(buffer, cancellationToken);
+                    ReadResult result = await reader.ReadAsync(cancellationToken);
+                    ReadOnlySequence<byte> buffer = result.Buffer;
 
-                    if (bytesRead == 0) break; // Client connection closed successfuly
-                        
-                    ReadOnlySpan<byte> data = buffer.AsSpan(0, bytesRead);
+                    SequencePosition consumed = buffer.Start;
+                    SequencePosition examined = buffer.End;
 
-                    if (RespParser.TryParse(data, out RespValue? respValue, out int consumed))
+                    try
                     {
-                        RedisCommand redisCommand = CommandDecoder.Decode(respValue!);
-                        Console.WriteLine($"Command: {redisCommand.Name}");
+                        while (RespParser.TryParse(buffer, out RespValue? respValue, out SequencePosition consumedPosition))
+                        {
+                            if (buffer.Start.Equals(consumedPosition))
+                                throw new InvalidDataException("Parser consumed 0 bytes for a complete RESP value.");
+
+                            RedisCommand redisCommand = CommandDecoder.Decode(respValue!);
+                            Console.WriteLine($"Command: {redisCommand.Name}");
+
+                            buffer = buffer.Slice(consumedPosition);
+                            consumed = buffer.Start;
+                            examined = buffer.End;
+                        }
+
+                        if (buffer.Length > MaxRequestSize)
+                            throw new InvalidDataException($"Request is too large. Max request size is {MaxRequestSize} bytes.");
+                    }
+                    finally
+                    {
+                        reader.AdvanceTo(consumed, examined);
                     }
 
+                    if (result.IsCompleted) break; // Client connection closed successfully
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { /* Server closing, Expected */ }
@@ -50,6 +71,7 @@ namespace MiniRedis.Server.Networking
             }
             finally
             {
+                await reader.CompleteAsync();
                 Dispose();
             }
 

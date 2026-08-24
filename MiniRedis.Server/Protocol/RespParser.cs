@@ -1,7 +1,7 @@
+using System.Buffers;
 using System.Text;
 
 namespace MiniRedis.Server.Protocol;
-
 
 /*
     This class is responsible for parsing RESP3 (REdis Serialization Protocol) messages.
@@ -10,50 +10,62 @@ namespace MiniRedis.Server.Protocol;
 internal static class RespParser
 {
     private static ReadOnlySpan<byte> LineEnd => "\r\n"u8;
-    public static bool TryParse(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+
+    public static bool TryParse(ReadOnlySequence<byte> buffer, out RespValue? value, out SequencePosition consumed)
     {
-        consumed = 0;
-        value = null;
+        SequenceReader<byte> reader = new(buffer);
 
-        if (buffer.IsEmpty) return false;
-
-        RespType type = (RespType)buffer[0];
-        return type switch
+        if (!TryParse(ref reader, out value))
         {
-            RespType.SimpleStrings => TryParseSimpleString(buffer, out value, out consumed),
-            RespType.SimpleErrors => TryParseSimpleError(buffer, out value, out consumed),
-            RespType.Integers => TryParseInteger(buffer, out value, out consumed),
-            RespType.BulkStrings => TryParseBulkString(buffer, out value, out consumed),
-            RespType.Arrays => TryParseArray(buffer, out value, out consumed),
-            RespType.Nulls => TryParseNull(buffer, out value, out consumed),
-            RespType.Booleans => TryParseBoolean(buffer, out value, out consumed),
-            RespType.Doubles => TryParseDouble(buffer, out value, out consumed),
-            RespType.BigNumbers => TryParseBigNumber(buffer, out value, out consumed),
-            RespType.BulkErrors => TryParseBulkError(buffer, out value, out consumed),
-            RespType.VerbatimStrings => TryParseVerbatimString(buffer, out value, out consumed),
-            RespType.Maps => TryParseMap(buffer, out value, out consumed),
-            RespType.Attributes => TryParseAttribute(buffer, out value, out consumed),
-            RespType.Sets => TryParseSet(buffer, out value, out consumed),
-            RespType.Pushes => TryParsePush(buffer, out value, out consumed),
+            consumed = buffer.Start;
+            return false;
+        }
 
-            _ => throw new InvalidDataException(
-                $"Unknown RESP type prefix: '{(char)buffer[0]}'")
-        };
+        consumed = reader.Position;
+        return true;
     }
 
-    /*
-        $4\r\nPING\r\n
-        $       BulkString
-        4       payload length
-        \r\n    header end
-        PING    4 byte 
-        \r\n    value end
-    */
-    private static bool TryParseBulkString(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParse(ref SequenceReader<byte> reader, out RespValue? value)
+    {
+        value = null;
+        SequenceReader<byte> start = reader;
+
+        if (!reader.TryRead(out byte prefix))
+            return false;
+
+        bool parsed = (RespType)prefix switch
+        {
+            RespType.SimpleStrings => TryParseSimpleString(ref reader, out value),
+            RespType.SimpleErrors => TryParseSimpleError(ref reader, out value),
+            RespType.Integers => TryParseInteger(ref reader, out value),
+            RespType.BulkStrings => TryParseBulkString(ref reader, out value),
+            RespType.Arrays => TryParseArray(ref reader, out value),
+            RespType.Nulls => TryParseNull(ref reader, out value),
+            RespType.Booleans => TryParseBoolean(ref reader, out value),
+            RespType.Doubles => TryParseDouble(ref reader, out value),
+            RespType.BigNumbers => TryParseBigNumber(ref reader, out value),
+            RespType.BulkErrors => TryParseBulkError(ref reader, out value),
+            RespType.VerbatimStrings => TryParseVerbatimString(ref reader, out value),
+            RespType.Maps => TryParseMap(ref reader, out value),
+            RespType.Attributes => TryParseAttribute(ref reader, out value),
+            RespType.Sets => TryParseSet(ref reader, out value),
+            RespType.Pushes => TryParsePush(ref reader, out value),
+
+            _ => throw new InvalidDataException(
+                $"Unknown RESP type prefix: '{(char)prefix}'")
+        };
+
+        if (!parsed)
+            reader = start;
+
+        return parsed;
+    }
+
+    private static bool TryParseBulkString(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(buffer, out ReadOnlySpan<byte> data, out consumed))
+        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
             return false;
 
         value = new RespBulkString(data.ToArray());
@@ -61,11 +73,11 @@ internal static class RespParser
         return true;
     }
 
-    private static bool TryParseBulkError(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseBulkError(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(buffer, out ReadOnlySpan<byte> data, out consumed))
+        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
             return false;
 
         value = new RespBulkError(data.ToArray());
@@ -73,117 +85,73 @@ internal static class RespParser
         return true;
     }
 
-    // Verbatim String format:
-    // =<length>\r\n<encoding>:<data>\r\n
-    //
-    // Example:
-    // =15\r\ntxt:Some string\r\n
-    private static bool TryParseVerbatimString(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseVerbatimString(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
 
-        if (!TryReadLengthPrefixedPayload(buffer, out ReadOnlySpan<byte> data, out consumed))
+        if (!TryReadLengthPrefixedPayload(ref reader, out ReadOnlySequence<byte> data))
             return false;
 
         if (data.Length < 4)
             throw new InvalidDataException("Invalid verbatim string.");
 
-        if (data[3] != (byte)':')
+        if (GetByteAt(data, 3) != (byte)':')
             throw new InvalidDataException("Verbatim string encoding must be followed by ':'.");
 
-        string encoding = Encoding.ASCII.GetString(data[..3]);
-
-        byte[] content = data[4..].ToArray();
+        string encoding = GetString(data.Slice(0, 3), Encoding.ASCII);
+        byte[] content = data.Slice(4).ToArray();
 
         value = new RespVerbatimString(encoding, content);
 
         return true;
     }
 
-    // $4\r\nPING\r\n
-    //
-    // payload:
-    //
-    // 4\r\nPING\r\n
-    //
-    // TryReadLine returns:
-    // line = "4"
-    // headerConsumed = 3 ("4\r\n")
-    private static bool TryReadLengthPrefixedPayload(ReadOnlySpan<byte> buffer, out ReadOnlySpan<byte> data, out int consumed)
+    private static bool TryReadLengthPrefixedPayload(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> data)
     {
         data = default;
-        consumed = 0;
+        SequenceReader<byte> start = reader;
 
-        // Skip RESP type prefix:
-        // $, ! or =
-        ReadOnlySpan<byte> payload = buffer[1..];
-
-        if (!TryReadLine(payload, out ReadOnlySpan<byte> lengthBytes, out int headerConsumed))
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> lengthBytes))
+        {
+            reader = start;
             return false;
+        }
 
-        if (!int.TryParse(Encoding.ASCII.GetString(lengthBytes), out int length))
+        if (!int.TryParse(GetString(lengthBytes, Encoding.ASCII), out int length))
             throw new InvalidDataException("Invalid length-prefixed RESP value.");
 
         if (length < 0)
             throw new InvalidDataException("Length cannot be negative.");
 
-        int dataStart = headerConsumed;
-        int dataEnd = dataStart + length;
-
-        // The entire payload and trailing CRLF
-        // have not arrived yet.
-        if (payload.Length < dataEnd + LineEnd.Length)
+        if (reader.Remaining < length + LineEnd.Length)
+        {
+            reader = start;
             return false;
+        }
 
-        // Payload must be followed immediately by CRLF.
-        if (!payload.Slice(dataEnd, LineEnd.Length).SequenceEqual(LineEnd))
+        data = reader.Sequence.Slice(reader.Position, length);
+        reader.Advance(length);
+
+        if (!reader.TryRead(out byte carriageReturn) || !reader.TryRead(out byte lineFeed))
+        {
+            reader = start;
+            return false;
+        }
+
+        if (carriageReturn != (byte)'\r' || lineFeed != (byte)'\n')
             throw new InvalidDataException("Length-prefixed RESP value must end with CRLF.");
-
-        data = payload.Slice(dataStart, length);
-
-        consumed =
-            1 +                  // RESP prefix: $, ! or =
-            headerConsumed +     // <length>\r\n
-            length +             // payload
-            LineEnd.Length;      // trailing \r\n
 
         return true;
     }
 
-    // *1\r\n$4\r\nPING\r\n
-    //
-    // *1      -> Array with 1 element
-    // \r\n    -> End of array length header
-    //
-    // $4      -> Bulk String with a length of 4 bytes
-    // \r\n    -> End of Bulk string length header
-    //
-    // PING    -> 4-byte Bulk string value
-    // \r\n    -> End of Bulk string
-    //
-    //
-    // Example with 2 elements:
-    //
-    // *2\r\n$3\r\nGET\r\n$4\r\nname\r\n
-    //
-    // *2      -> Array with 2 elements
-    //
-    // $3      -> First element is a 3-byte Bulk String
-    // GET     -> First element value
-    //
-    // $4      -> Second element is a 4-byte Bulk String
-    // name    -> Second element value
-    private static bool TryParseArray(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseArray(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
-        consumed = 0;
 
-        ReadOnlySpan<byte> payload = buffer[1..];
-
-        if (!TryReadLine(payload, out var countBytes, out int headerConsumed))
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> countBytes))
             return false;
 
-        if (!int.TryParse(Encoding.ASCII.GetString(countBytes), out int numberOfElements))
+        if (!int.TryParse(GetString(countBytes, Encoding.ASCII), out int numberOfElements))
             throw new InvalidDataException("Invalid array length.");
 
         if (numberOfElements < 0)
@@ -191,84 +159,70 @@ internal static class RespParser
 
         List<RespValue> values = new(numberOfElements);
 
-        // 1 byte '*' + 3 bytes "2\r\n"
-        int offset = 1 + headerConsumed;
         for (int i = 0; i < numberOfElements; i++)
         {
-            if (!TryParse(buffer[offset..], out RespValue? item, out int itemConsumed))
-            {
-                // One of the array elements has not fully arrived yet.
+            if (!TryParse(ref reader, out RespValue? item))
                 return false;
-            }
 
             values.Add(item!);
-
-            offset += itemConsumed;
         }
 
         value = new RespArray(values);
-        consumed = offset;
 
         return true;
     }
 
-    // +string\r\n
-    private static bool TryParseSimpleString(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseSimpleString(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        return TryParseSimple(buffer, x => new RespSimpleString(x), out value, out consumed);
+        return TryParseSimple(ref reader, x => new RespSimpleString(x), out value);
     }
 
-    // -error\r\n
-    private static bool TryParseSimpleError(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseSimpleError(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        return TryParseSimple(buffer, x => new RespSimpleError(x), out value, out consumed);
+        return TryParseSimple(ref reader, x => new RespSimpleError(x), out value);
     }
 
-    private static bool TryParsePush(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParsePush(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseAttribute(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseAttribute(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseSet(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseSet(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseMap(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseMap(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseBigNumber(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseBigNumber(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseDouble(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseDouble(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    // RESP3 Boolean:
-    // #t\r\n
-    // #f\r\n
-    private static bool TryParseBoolean(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseBoolean(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
-        consumed = 0;
 
-        if (!TryReadLine(buffer[1..], out ReadOnlySpan<byte> line, out int lineConsumed))
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
             return false;
 
         if (line.Length != 1)
             throw new InvalidDataException("Invalid RESP boolean value.");
 
-        bool result = line[0] switch
+        bool result = GetByteAt(line, 0) switch
         {
             (byte)'t' => true,
             (byte)'f' => false,
@@ -276,63 +230,57 @@ internal static class RespParser
         };
 
         value = new RespBoolean(result);
-        consumed = 1 + lineConsumed;
 
         return true;
     }
 
-    // _\r\n
-    private static bool TryParseNull(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseNull(ref SequenceReader<byte> reader, out RespValue? value)
     {
         value = null;
-        consumed = 0;
 
-        if (!TryReadLine(buffer[1..], out var line, out int lineConsumed))
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
             return false;
 
         if (!line.IsEmpty)
             throw new InvalidDataException("RESP null must not contain a value.");
 
-        consumed = 1 + lineConsumed;
         value = new RespNull();
 
         return true;
     }
 
-    private static bool TryParseInteger(ReadOnlySpan<byte> buffer, out RespValue? value, out int consumed)
+    private static bool TryParseInteger(ref SequenceReader<byte> reader, out RespValue? value)
     {
         throw new NotImplementedException();
     }
 
-    private static bool TryParseSimple(ReadOnlySpan<byte> buffer, Func<string, RespValue> factory, out RespValue? value, out int consumed)
+    private static bool TryParseSimple(ref SequenceReader<byte> reader, Func<string, RespValue> factory, out RespValue? value)
     {
         value = null;
-        consumed = 0;
 
-        // Skip type marker (enum RespType)
-        if (!TryReadLine(buffer[1..], out var line, out int lineConsumed))
+        if (!TryReadLine(ref reader, out ReadOnlySequence<byte> line))
             return false;
 
-        value = factory(Encoding.UTF8.GetString(line));
-
-        consumed = 1 + lineConsumed;
+        value = factory(GetString(line, Encoding.UTF8));
 
         return true;
     }
 
-    private static bool TryReadLine(ReadOnlySpan<byte> buffer, out ReadOnlySpan<byte> line, out int consumed)
+    private static bool TryReadLine(ref SequenceReader<byte> reader, out ReadOnlySequence<byte> line)
     {
-        line = default;
-        consumed = 0;
+        return reader.TryReadTo(out line, LineEnd, advancePastDelimiter: true);
+    }
 
-        int lineEnd = buffer.IndexOf(LineEnd);
+    private static byte GetByteAt(ReadOnlySequence<byte> sequence, long index)
+    {
+        return sequence.Slice(index, 1).FirstSpan[0];
+    }
 
-        if (lineEnd < 0)
-            return false;
+    private static string GetString(ReadOnlySequence<byte> sequence, Encoding encoding)
+    {
+        if (sequence.IsSingleSegment)
+            return encoding.GetString(sequence.FirstSpan);
 
-        line = buffer[..lineEnd];
-        consumed = lineEnd + LineEnd.Length;
-
-        return true;
+        return encoding.GetString(sequence.ToArray());
     }
 }
