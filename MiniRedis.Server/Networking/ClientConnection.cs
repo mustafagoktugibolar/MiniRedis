@@ -1,4 +1,4 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
 using MiniRedis.Server.Commands;
 using MiniRedis.Server.Protocol;
 
@@ -39,6 +39,14 @@ namespace MiniRedis.Server.Networking
             {
                 //  Client connection was unexpectedly closed
                 Console.WriteLine($"Client connection dropped unexpectedly: {ex.Message}");
+            }
+            catch (InvalidDataException ex)
+            {
+                Console.WriteLine($"Invalid client request: {ex.Message}");
+            }
+            catch (NotImplementedException ex)
+            {
+                Console.WriteLine($"Unsupported RESP value: {ex.Message}");
             }
             finally
             {

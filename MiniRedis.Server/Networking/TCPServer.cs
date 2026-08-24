@@ -1,4 +1,4 @@
-﻿ using System.Net;
+ using System.Net;
 using System.Net.Sockets;
 
 namespace MiniRedis.Server.Networking
@@ -13,14 +13,28 @@ namespace MiniRedis.Server.Networking
             _tcpListener.Start();
             try
             {
-                while (true)
+                while (!cancellationToken.IsCancellationRequested)
                 {
                     TcpClient tcpClient = await _tcpListener.AcceptTcpClientAsync(cancellationToken);
-                    using var clientConnection = new ClientConnection(tcpClient);
-                    await clientConnection.RunAsync(cancellationToken);
+                    _ = HandleClientAsync(tcpClient, cancellationToken);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { /* Expected shutdown. */ }
+        }
+
+        private static async Task HandleClientAsync(TcpClient tcpClient, CancellationToken cancellationToken)
+        {
+            using var clientConnection = new ClientConnection(tcpClient);
+
+            try
+            {
+                await clientConnection.RunAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { /* Expected shutdown. */ }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Client handling failed: {ex.Message}");
+            }
         }
 
         public void Dispose()
