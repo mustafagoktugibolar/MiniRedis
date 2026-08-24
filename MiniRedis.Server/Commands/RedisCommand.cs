@@ -1,6 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace MiniRedis.Server.Commands;
 
-namespace MiniRedis.Server.Commands;
-internal sealed record RedisCommand(string Name, IReadOnlyList<string> Args);
+internal sealed record RedisCommand(string Name, IReadOnlyList<ReadOnlyMemory<byte>> Arguments);

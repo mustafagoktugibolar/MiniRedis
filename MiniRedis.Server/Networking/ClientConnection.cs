@@ -26,9 +26,10 @@ namespace MiniRedis.Server.Networking
                         
                     ReadOnlySpan<byte> data = buffer.AsSpan(0, bytesRead);
 
-                    if (RespParser.TryParse(data, out RedisCommand? command, out int consumed))
+                    if (RespParser.TryParse(data, out RespValue? respValue, out int consumed))
                     {
-                        Console.WriteLine(command!.Name);
+                        RedisCommand redisCommand = CommandDecoder.Decode(respValue!);
+                        Console.WriteLine($"Command: {redisCommand.Name}");
                     }
 
                 }

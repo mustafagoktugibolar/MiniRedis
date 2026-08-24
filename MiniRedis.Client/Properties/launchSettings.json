@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "MiniRedis.Client": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
