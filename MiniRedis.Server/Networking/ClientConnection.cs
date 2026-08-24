@@ -31,8 +31,20 @@ namespace MiniRedis.Server.Networking
 
                     try
                     {
-                        while (RespParser.TryParse(buffer, out RespValue? respValue, out SequencePosition consumedPosition))
+                        while (true)
                         {
+                            ParseStatus parseStatus = RespParser.Parse(
+                                buffer,
+                                out RespValue? respValue,
+                                out SequencePosition consumedPosition,
+                                out string? error);
+
+                            if (parseStatus == ParseStatus.Incomplete)
+                                break;
+
+                            if (parseStatus == ParseStatus.Invalid)
+                                throw new InvalidDataException(error);
+
                             if (buffer.Start.Equals(consumedPosition))
                                 throw new InvalidDataException("Parser consumed 0 bytes for a complete RESP value.");
 

@@ -4,25 +4,44 @@ using System.Text;
 namespace MiniRedis.Server.Protocol;
 
 /*
-    This class is responsible for parsing RESP3 (REdis Serialization Protocol) messages.
-    It takes a byte array and the number of bytes read, and returns a RedisCommand object.
+    This class is responsible for parsing  RESP2 & RESP3 (REdis Serialization Protocol) messages.
+    It takes a byte sequence and returns a RESP value.
 */
 internal static class RespParser
 {
     private static ReadOnlySpan<byte> LineEnd => "\r\n"u8;
 
-    public static bool TryParse(ReadOnlySequence<byte> buffer, out RespValue? value, out SequencePosition consumed)
+    public static ParseStatus Parse(ReadOnlySequence<byte> buffer, out RespValue? value, out SequencePosition consumed, out string? error)
     {
+        value = null;
+        consumed = buffer.Start;
+        error = null;
+
         SequenceReader<byte> reader = new(buffer);
 
-        if (!TryParse(ref reader, out value))
+        try
         {
-            consumed = buffer.Start;
-            return false;
-        }
+            if (!TryParse(ref reader, out value))
+                return ParseStatus.Incomplete;
 
-        consumed = reader.Position;
-        return true;
+            consumed = reader.Position;
+            return ParseStatus.Complete;
+        }
+        catch (InvalidDataException ex)
+        {
+            error = ex.Message;
+            return ParseStatus.Invalid;
+        }
+        catch (NotSupportedException ex)
+        {
+            error = ex.Message;
+            return ParseStatus.Invalid;
+        }
+        catch (NotImplementedException ex)
+        {
+            error = ex.Message;
+            return ParseStatus.Invalid;
+        }
     }
 
     private static bool TryParse(ref SequenceReader<byte> reader, out RespValue? value)
@@ -184,32 +203,32 @@ internal static class RespParser
 
     private static bool TryParsePush(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP push values are not supported yet.");
     }
 
     private static bool TryParseAttribute(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP attribute values are not supported yet.");
     }
 
     private static bool TryParseSet(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP set values are not supported yet.");
     }
 
     private static bool TryParseMap(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP map values are not supported yet.");
     }
 
     private static bool TryParseBigNumber(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP big number values are not supported yet.");
     }
 
     private static bool TryParseDouble(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP double values are not supported yet.");
     }
 
     private static bool TryParseBoolean(ref SequenceReader<byte> reader, out RespValue? value)
@@ -251,7 +270,7 @@ internal static class RespParser
 
     private static bool TryParseInteger(ref SequenceReader<byte> reader, out RespValue? value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("RESP integer values are not supported yet.");
     }
 
     private static bool TryParseSimple(ref SequenceReader<byte> reader, Func<string, RespValue> factory, out RespValue? value)
